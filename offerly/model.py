@@ -70,6 +70,10 @@ def validate_agent_output(content, output_format):
 class AgentDeepSeek(ChatDeepSeek):
     """Use the upstream AgentOutput function envelope without closing map fields."""
 
+    def _supports_thinking(self):
+        # The current public Flash alias no longer contains the v4 prefix.
+        return self.model.lower() == "deepseek-flash" or super()._supports_thinking()
+
     def usage_received(self, usage):
         pass
 
@@ -77,8 +81,7 @@ class AgentDeepSeek(ChatDeepSeek):
         payload = DeepSeekMessageSerializer.serialize_messages(messages)
         options = self._request_kwargs()
         if output_format is not None:
-            # JSON mode uses the schema as instructions. The strict function
-            # schema optimizer closes dictionaries such as rewrites and order.
+            # Keep map-valued resume fields open in the function schema.
             schema = output_format.model_json_schema()
             options["tools"] = [
                 {
@@ -107,10 +110,23 @@ class AgentDeepSeek(ChatDeepSeek):
             ) from None
         except APIError as exc:
             status = getattr(exc, "status_code", None) or 502
+            body = getattr(exc, "body", None)
+            error = body.get("error", body) if isinstance(body, dict) else {}
+            message = str(error.get("message", "")) if isinstance(error, dict) else ""
+            if status == 400 and "Thinking mode does not support this tool_choice" in message:
+                reason = "模型请求参数冲突（400）：思考模式不支持指定工具调用，请检查服务端思考模式配置。"
+            else:
+                reason = {
+                    400: "模型请求参数不兼容（400），请检查服务端接口配置。",
+                    401: "模型密钥无效或已失效（401），请更新模型配置。",
+                    402: "DeepSeek 余额不足（402），充值后可交还 Agent 继续。",
+                    403: "模型接口拒绝访问（403），请检查密钥权限。",
+                    404: "模型或接口地址不存在（404），请检查模型名称与接口地址。",
+                    422: "模型请求参数校验失败（422），请检查服务端接口配置。",
+                }.get(status, f"模型服务请求失败（HTTP {status}），请稍后继续。")
+            logger.warning("DeepSeek request rejected: status=%s", status)
             raise ModelProviderError(
-                "DeepSeek 余额不足（402），充值后可交还 Agent 继续。"
-                if status == 402
-                else "模型服务请求失败，请检查配置或余额。",
+                reason,
                 status_code=status,
                 model=self.name,
             ) from None

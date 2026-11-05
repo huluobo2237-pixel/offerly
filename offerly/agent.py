@@ -500,7 +500,7 @@ class RecruitmentAgent(AutonomousWorkflow):
                     response = await super().ainvoke(*args, **kwargs)
                 except ModelProviderError as exc:
                     owner.last_model_error = str(exc)[:1200]
-                    if exc.status_code == 402:
+                    if exc.status_code in (400, 401, 402, 403, 404, 422):
                         balance_error = exc
                         if owner.agent:
                             owner.agent.stop()

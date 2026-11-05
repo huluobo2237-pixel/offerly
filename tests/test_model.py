@@ -24,6 +24,15 @@ class Empty(BaseModel):
 
 
 class ModelProtocolTests(unittest.IsolatedAsyncioTestCase):
+    def test_flash_alias_explicitly_disables_thinking_for_forced_tools(self):
+        for name in ("deepseek-flash", "deepseek-v4-flash", "deepseek-v4-pro"):
+            with self.subTest(model=name):
+                model = AgentDeepSeek(model=name, thinking=False)
+                self.assertEqual(
+                    model._request_kwargs()["extra_body"]["thinking"],
+                    {"type": "disabled"},
+                )
+
     async def request(self, content, *, summary=False):
         tools = Tools()
 
@@ -196,7 +205,12 @@ class ModelProtocolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.completion, "Verified the selected role.")
         self.assertNotIn("response_format", sent[0])
 
-    async def test_insufficient_balance_stops_the_loop_without_another_request(self):
+    async def test_invalid_configuration_stops_without_another_request(self):
+        for status in (400, 401, 402, 403, 404, 422):
+            with self.subTest(status=status):
+                await self.assert_fatal_error_stops(status)
+
+    async def assert_fatal_error_stops(self, status):
         with tempfile.TemporaryDirectory() as directory:
             owner = ApplicationServices(Path(directory)).agent
             owner.job = {"progress": {"timeline": []}}
@@ -205,11 +219,11 @@ class ModelProtocolTests(unittest.IsolatedAsyncioTestCase):
                 {"model": "unchanged-model", "apiKey": "offline-only"}
             )
             provider = AsyncMock(
-                side_effect=ModelProviderError("余额不足", status_code=402)
+                side_effect=ModelProviderError("接口配置错误", status_code=status)
             )
             with patch.object(AgentDeepSeek, "ainvoke", provider):
                 for _ in range(2):
-                    with self.assertRaisesRegex(ModelProviderError, "余额不足"):
+                    with self.assertRaisesRegex(ModelProviderError, "接口配置错误"):
                         await model.ainvoke([UserMessage(content="Generate a resume")])
             provider.assert_awaited_once()
             owner.agent.stop.assert_called_once()
