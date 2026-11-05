@@ -1,0 +1,7 @@
+{
+  "name": "offerly-job-search",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.19.0" },
+  "dependencies": { "jobhunt-cli": "0.2.6" }
+}

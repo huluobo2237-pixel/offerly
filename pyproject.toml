@@ -1,0 +1,32 @@
+[project]
+name = "offerly"
+version = "0.1.0"
+description = "Offerly workspace, job catalog, resume PDF and phone collaboration services"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "browser-use",
+  "aiohttp==3.14.5",
+  "pydantic==2.13.5",
+  "httpx==0.28.1",
+  "openai==2.26.0",
+  "reportlab==4.4.9",
+  "pypdf==6.16.2",
+  "aiortc==1.15.0",
+  "av==17.1.0",
+  "pillow==12.3.0",
+  "websockets==15.0.1",
+  "pypdfium2==5.14.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+browser-use = { path = "vendor/browser-use", editable = true }
+
+[tool.ruff]
+target-version = "py311"
+extend-exclude = ["vendor", "data", ".cache", "frontend/job-search/node_modules"]
+
+[tool.ruff.lint]
+select = ["F"]

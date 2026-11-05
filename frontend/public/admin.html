@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Offerly · 岗位库管理</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="main">
+      <h1>岗位库管理</h1>
+      <p>公开岗位由 Agent 搜索与运营采集共同沉淀，普通用户无需配置搜索密钥。</p>
+      <section class="card padded">
+        <form id="config">
+          <div class="field">
+            <label>Tavily API Key</label
+            ><input
+              name="apiKey"
+              type="password"
+              required
+              minlength="8"
+              autocomplete="off"
+            />
+          </div>
+          <button class="btn primary">保存管理端密钥</button>
+          <p>
+            <a href="https://app.tavily.com" target="_blank" rel="noopener"
+              >获取密钥 ↗</a
+            >
+            · 密钥加密保存在服务端，不下发给用户。
+          </p>
+        </form>
+      </section>
+      <section class="card padded">
+        <h2>批量充实岗位库</h2>
+        <p>
+          从已接入官网和公开校招目录采集各类岗位，近期已读来源自动跳过。目录只提供入口，岗位以官网实际返回为准。
+        </p>
+        <div class="form-actions">
+          <button class="btn primary" id="bulk">
+            批量采集（不消耗搜索额度）</button
+          ><button class="btn" id="industries">
+            分行业扩充（最多 10 credits）
+          </button>
+        </div>
+      </section>
+      <section class="card padded">
+        <form id="collect">
+          <div class="form-grid">
+            <div class="field">
+              <label>补充发现的岗位方向</label
+              ><input name="keywords" value="AI" required maxlength="160" />
+            </div>
+            <div class="field">
+              <label>毕业年份</label
+              ><input name="year" value="2027" pattern="20[0-9]{2}" />
+            </div>
+          </div>
+          <div class="form-actions">
+            <button class="btn">搜索新企业并入库</button
+            ><button type="button" class="btn" id="refresh">
+              刷新已发现企业</button
+            ><button type="button" class="btn" id="stop">停止采集</button>
+          </div>
+        </form>
+        <p id="status" role="status">连接管理服务…</p>
+        <div id="sources"></div>
+      </section>
+      <p><a href="/#preferences">返回用户页面</a></p>
+    </main>
+    <script type="module">
+      let token = "",
+        timer;
+      const status = document.getElementById("status");
+      async function api(path, options = {}) {
+        const r = await fetch(path, {
+          ...options,
+          headers: { "X-Offerly-Token": token, ...options.headers },
+        });
+        const data = await r.json();
+        if (!r.ok) throw Error(data.error || "操作失败");
+        return data;
+      }
+      async function poll() {
+        clearTimeout(timer);
+        try {
+          const data = await api("/api/jobs/search"),
+            s = data.search,
+            c = data.catalog || s?.catalog || {},
+            running = s?.status === "running";
+          status.textContent = `岗位库 ${c.companies || 0} 家企业、${c.jobs || 0} 条记录。${s ? `采集${running ? "进行中" : s.status === "cancelled" ? "已停止" : s.status === "failed" ? "失败" : "已结束"}，${s.done}/${s.total} 个来源，跳过近期来源 ${s.skippedSources || 0} 个，搜索消耗 ${s.searchCredits || 0} credits。${s.error || ""}` : ""}`;
+          document
+            .querySelectorAll(
+              '#bulk,#industries,#refresh,#collect button[type="submit"],#collect button:not([type])',
+            )
+            .forEach((b) => (b.disabled = running));
+          const container = document.getElementById("sources");
+          container.replaceChildren();
+          if (!running && s?.sources?.length) {
+            const partial = s.sources.filter((x) => x.status !== "ok");
+            if (partial.length) {
+              const detail = document.createElement("details"),
+                summary = document.createElement("summary");
+              summary.textContent = `${partial.length} 个来源读取不完整或暂不可用`;
+              detail.append(summary);
+              for (const source of partial) {
+                const p = document.createElement("p");
+                p.textContent = `${source.company}：已读 ${source.found} 岗，${source.warning === "PAGE_LIMIT" ? "达到本批分页上限" : source.warning || "接口暂不可用"}`;
+                detail.append(p);
+              }
+              container.append(detail);
+            }
+          }
+          if (running) timer = setTimeout(poll, 1500);
+        } catch (e) {
+          status.textContent = e.message;
+        }
+      }
+      document
+        .getElementById("config")
+        .addEventListener("submit", async (e) => {
+          e.preventDefault();
+          try {
+            await api("/api/jobs/search/config", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                apiKey: e.target.elements.apiKey.value.trim(),
+              }),
+            });
+            e.target.reset();
+            await poll();
+          } catch (error) {
+            status.textContent = error.message;
+          }
+        });
+      async function collect(refresh = false) {
+        try {
+          const form = document.getElementById("collect");
+          await api(
+            refresh ? "/api/jobs/collect/refresh" : "/api/jobs/search",
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                keywords: form.elements.keywords.value,
+                year: form.elements.year.value,
+                category: "校园招聘",
+                mode: "web",
+              }),
+            },
+          );
+          await poll();
+        } catch (error) {
+          status.textContent = error.message;
+        }
+      }
+      document.getElementById("collect").addEventListener("submit", (e) => {
+        e.preventDefault();
+        collect();
+      });
+      document
+        .getElementById("refresh")
+        .addEventListener("click", () => collect(true));
+      document.getElementById("stop").addEventListener("click", async () => {
+        try {
+          await api("/api/jobs/search/cancel", { method: "POST" });
+          await poll();
+        } catch (e) {
+          status.textContent = e.message;
+        }
+      });
+      async function bulk(searchCredits = 0) {
+        try {
+          await api("/api/jobs/collect/bulk", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ limit: 200, pages: 5, searchCredits }),
+          });
+          await poll();
+        } catch (e) {
+          status.textContent = e.message;
+        }
+      }
+      document.getElementById("bulk").addEventListener("click", () => bulk());
+      document
+        .getElementById("industries")
+        .addEventListener("click", () => bulk(10));
+      try {
+        token = (await (await fetch("/api/bootstrap")).json()).token;
+        await poll();
+      } catch (e) {
+        status.textContent = "请从运营者本机管理服务打开此页面。";
+      }
+    </script>
+  </body>
+</html>

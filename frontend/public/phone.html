@@ -1,0 +1,252 @@
+<!doctype html>
+<html lang="zh-CN">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Offerly · 手机协作</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      background: #f4f6f8;
+      color: #202a3a;
+      font:
+        15px/1.6 system-ui,
+        sans-serif;
+    }
+    main {
+      max-width: 780px;
+      margin: auto;
+      padding: 22px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    h1 {
+      font-size: 25px;
+      margin: 8px 0;
+    }
+    h2 {
+      font-size: 19px;
+    }
+    small,
+    .muted {
+      color: #687486;
+    }
+    section {
+      background: white;
+      border: 1px solid #dce3ea;
+      border-radius: 18px;
+      padding: 18px;
+      margin: 16px 0;
+    }
+    button {
+      background: #266348;
+      color: white;
+      border: 0;
+      border-radius: 9px;
+      padding: 12px 16px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button.secondary {
+      background: #eaf0ed;
+      color: #214e3b;
+    }
+    button:disabled {
+      opacity: 0.5;
+    }
+    input,
+    select,
+    textarea {
+      width: 100%;
+      font: inherit;
+      padding: 10px;
+      border: 1px solid #b9c5ce;
+      border-radius: 8px;
+      margin: 8px 0 16px;
+    }
+    label {
+      display: block;
+      margin-top: 14px;
+    }
+    #notice {
+      background: #fff2d5;
+      border: 1px solid #e8bc55;
+      padding: 16px;
+      border-radius: 12px;
+      display: none;
+    }
+    #screen {
+      position: relative;
+      overflow: hidden;
+      background: #eef1f4;
+    }
+    #screen {
+      height: 65vh;
+      min-height: 320px;
+      touch-action: none;
+    }
+    .tools {
+      position: static;
+      background: white;
+      padding: 10px;
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    #message {
+      color: #98451f;
+      white-space: pre-wrap;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .timeline {
+      padding-left: 20px;
+      font-size: 13px;
+      color: #536274;
+    }
+    #picture-section[hidden] {
+      display: none;
+    }
+    .badge {
+      font-size: 12px;
+      background: #e4eee8;
+      color: #215139;
+      border-radius: 20px;
+      padding: 4px 9px;
+    }
+    dialog {
+      border: 0;
+      border-radius: 18px;
+      max-width: 90vw;
+    }
+    dialog::backdrop {
+      background: #0006;
+    }
+    #screen {
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .remote-keyboard-capture {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+      padding: 0;
+      margin: 0;
+      border: 0;
+      font-size: 16px;
+    }
+    .tools button[aria-pressed="true"] {
+      background: #9d5414;
+      color: white;
+    }
+  </style>
+  <main>
+    <header>
+      <b>Offerly / 手机协作</b
+      ><span id="connection" class="badge">正在连接</span>
+    </header>
+    <h1 id="company">你的投递助手</h1>
+    <p class="muted">
+      Agent 需要协助时会在这里提醒。远控时请保持本页打开，并与电脑连接同一
+      Wi-Fi。
+    </p>
+    <small id="network-stats"></small>
+    <div id="message" role="alert"></div>
+    <div id="notice"></div>
+    <section id="application-details" hidden>
+      <label
+        ><input style="width: auto" type="checkbox" id="show-job" />
+        查看本次投递的岗位信息</label
+      >
+      <div
+        id="job-details"
+        hidden
+        style="white-space: pre-wrap; overflow-wrap: anywhere"
+      ></div>
+      <label
+        ><input style="width: auto" type="checkbox" id="show-resume" />
+        预览本次生成的专属简历</label
+      >
+      <div id="resume-details" hidden>
+        <p id="resume-message"></p>
+        <div id="resume-preview"></div>
+      </div>
+    </section>
+    <section>
+      <h2 id="phase">等待配对</h2>
+      <small id="counts"></small>
+      <ol id="timeline" class="timeline"></ol>
+      <div class="row">
+        <button id="pause" class="secondary" hidden>暂停</button
+        ><button id="stop" class="secondary" hidden>停止任务</button>
+      </div>
+    </section>
+
+    <section id="picture-section" hidden>
+      <h2>招聘网页接管</h2>
+      <label for="browser-tabs">浏览器标签页</label
+      ><select id="browser-tabs" aria-label="浏览器标签页"></select
+      ><button id="switch-tab" class="secondary">切换到所选标签</button>
+      <p id="screen-help" class="muted"></p>
+      <p id="frame-status" role="status">正在建立实时连接…</p>
+      <small id="remote-stats"></small>
+      <p id="input-state" class="muted">滚动模式</p>
+      <div class="tools">
+        <button id="scroll-mode" class="secondary" aria-pressed="false">
+          切换滚动模式</button
+        ><button id="retry-frame" class="secondary">重连</button
+        ><button id="zoom-in" class="secondary">放大</button
+        ><button id="zoom-out" class="secondary">缩小</button
+        ><button id="pan-mode" class="secondary">移动视野</button
+        ><button id="fullscreen" class="secondary">全屏</button>
+      </div>
+      <div id="screen"></div>
+      <button
+        id="open-keyboard"
+        class="secondary"
+        aria-label="打开手机键盘，直接输入到网页"
+      >
+        键盘
+      </button>
+      <textarea
+        id="remote-keyboard"
+        class="remote-keyboard-capture"
+        rows="1"
+        tabindex="-1"
+        aria-label="远程网页键盘输入"
+        autocomplete="off"
+        autocapitalize="off"
+        spellcheck="false"
+        inputmode="text"
+      ></textarea>
+      <div id="agent-reply">
+        <label for="agent-feedback">给agent的回复（可选）</label
+        ><textarea id="agent-feedback" rows="3" maxlength="4000"></textarea>
+        <div class="row">
+          <button id="resume">继续，交还 Agent</button
+          ><button id="complete">该岗位已投递完成</button
+          ><button id="skip" class="secondary">放弃该岗位</button>
+        </div>
+      </div>
+    </section>
+  </main>
+  <dialog id="alert-dialog">
+    <h2>Agent 需要你配合</h2>
+    <p id="alert-text"></p>
+    <button id="dismiss">去处理</button>
+  </dialog>
+  <script type="module" src="/phone.js"></script>
+</html>

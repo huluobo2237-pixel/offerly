@@ -1,0 +1,14 @@
+/.venv/
+/data/
+/output/
+/.cache/
+**/__pycache__/
+*.pyc
+/frontend/job-search/node_modules/
+.env
+/.ruff_cache/
+/tools/cloudflared.exe
+.env.*
+*.dpapi
+*.pem
+*.key
