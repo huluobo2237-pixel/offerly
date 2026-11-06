@@ -212,6 +212,53 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
                             AgentFocusChangedEvent(target_id=target, url="about:blank")
                         )
                         self.assertEqual(await dimensions(), original)
+                        # Long URLs must not expand the mobile page or modal.
+                        from urllib.parse import quote
+
+                        phone = (
+                            Path(__file__).resolve().parents[1]
+                            / "frontend/public/phone.html"
+                        ).read_text(encoding="utf-8")
+                        for width in (360, 390):
+                            await connection.call(
+                                "Emulation.setDeviceMetricsOverride",
+                                {
+                                    "width": width,
+                                    "height": 800,
+                                    "deviceScaleFactor": 1,
+                                    "mobile": True,
+                                },
+                                page_session,
+                            )
+                            await connection.call(
+                                "Page.navigate",
+                                {"url": "data:text/html;charset=utf-8," + quote(phone)},
+                                page_session,
+                            )
+                            for _ in range(50):
+                                checked = await connection.call(
+                                    "Runtime.evaluate",
+                                    {
+                                        "expression": "Boolean(document.querySelector('#alert-dialog'))",
+                                        "returnByValue": True,
+                                    },
+                                    page_session,
+                                )
+                                if checked["result"].get("value"):
+                                    break
+                                await asyncio.sleep(0.05)
+                            measured = await connection.call(
+                                "Runtime.evaluate",
+                                {
+                                    "expression": "(() => {const t='请登录 https://campus.example.com/'+'abc'.repeat(100);for(const id of ['notice','phase','alert-text']){const e=document.getElementById(id);if(e){e.textContent=t;e.style.display='block';}}const d=document.getElementById('alert-dialog');d.showModal();const r=d.getBoundingClientRect();return {viewport:innerWidth,page:document.documentElement.scrollWidth,left:r.left,right:r.right};})()",
+                                    "returnByValue": True,
+                                },
+                                page_session,
+                            )
+                            size = measured["result"]["value"]
+                            self.assertLessEqual(size["page"], width + 1)
+                            self.assertGreaterEqual(size["left"], 0)
+                            self.assertLessEqual(size["right"], width + 1)
                     finally:
                         await browser.stop()
                     await manager.browsers.disconnect("chrome")

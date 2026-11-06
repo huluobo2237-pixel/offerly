@@ -144,6 +144,11 @@ class ChooseJob(Target):
 
 
 class ConfirmJob(ChooseJob):
+    jd: str = Field(
+        default="",
+        max_length=16000,
+        description="从搜索结果选入本批时留空，无需先打开网页；岗位库完整JD可复用。只有官网已核实的完整职责与要求才能作为JD入库，搜索摘要不能当JD。",
+    )
     forBatch: bool = Field(
         default=True,
         description="是否加入本批投递；不符合当前偏好但有效的岗位设为false，只存入公共岗位库。",
@@ -426,6 +431,10 @@ class AutonomousWorkflow:
         }
 
     def catalog_job(self, company, title, url, jd, city=""):
+        from .recruitment_urls import application_url_allowed
+
+        if not application_url_allowed(url):
+            return False
         catalog = getattr(getattr(self.services, "job_search", None), "catalog", None)
         return bool(catalog and catalog.store_verified(company, title, url, jd, city))
 
@@ -433,8 +442,33 @@ class AutonomousWorkflow:
         """Record a real current detail page without selecting an application yet."""
         from .history import canonical_job_url
 
-        page = await self.application_page()
-        if await page.evaluate("() => location.href") != params.url:
+        from .recruitment_urls import application_url_allowed
+
+        if not application_url_allowed(params.url):
+            raise ValueError(
+                "投递入口必须是企业官网或企业专属招聘站，第三方招聘平台只能作为线索。"
+            )
+        cached = next(
+            (
+                j
+                for url, j in self.discovered.items()
+                if canonical_job_url(url) == canonical_job_url(params.url)
+                and j["company"] == params.company
+                and j["title"] == params.title
+            ),
+            {},
+        )
+        lead = next(
+            (
+                j
+                for j in self.job.get("discovery", {}).get("leads", [])
+                if canonical_job_url(j["url"]) == canonical_job_url(params.url)
+            ),
+            {},
+        )
+        from_results = bool(cached or lead)
+        page = None if from_results else await self.application_page()
+        if page and await page.evaluate("() => location.href") != params.url:
             raise ValueError(
                 "请在真实岗位详情页核实后，用当前网址调用 confirm_job；招聘首页或摘要不能算已确认岗位。"
             )
@@ -451,11 +485,13 @@ class AutonomousWorkflow:
                 {},
             )
             jd = cached.get("jd", "")
-        if len(jd.strip()) < 40:
+        if len(jd.strip()) < 40 and not from_results:
             raise ValueError(
                 "请读取岗位职责和任职要求后提供完整 JD，不能仅凭搜索摘要确认岗位。"
             )
-        stored = self.catalog_job(
+        if lead:
+            jd = ""  # Search summaries are never reusable, verified JD.
+        stored = bool(not lead) and self.catalog_job(
             params.company, params.title, params.url, jd, params.city
         )
         if not params.forBatch or self.task_options.source != "search":
@@ -498,7 +534,7 @@ class AutonomousWorkflow:
             "batch": self.batch_context(),
             "next": "本批已齐，依次打开已确认链接并 choose_job 开始投递。"
             if len(batch["jobs"]) >= batch["size"]
-            else "继续核实其他企业岗位并 confirm_job，本批凑齐前不开始申请。",
+            else "继续从搜索结果中选择其他企业的官网岗位并 confirm_job；不足继续搜索，凑齐前不打开详情逐个核实。",
         }
 
     async def candidate_profile(self):
@@ -529,6 +565,7 @@ class AutonomousWorkflow:
 
     async def search_positions(self, params):
         from frontend.job_search import SearchInput
+        from .recruitment_urls import application_url_allowed
 
         batch = self.current_batch()
         if batch and len(batch["jobs"]) >= batch["size"]:
@@ -542,6 +579,28 @@ class AutonomousWorkflow:
             category=self.task_options.requirements.category,
             year=self.task_options.requirements.year,
             mode="catalog",
+        )
+        # Read the local/shared catalog before spending a search credit.
+        result = await self.services.job_search.query_catalog(query)
+        needed = (
+            max(1, batch["size"] - len(batch["jobs"]))
+            if batch
+            else min(5, self.task_options.count)
+        )
+        available = {
+            normalize_company(j["company"])
+            for j in result.jobs
+            if application_url_allowed(j["url"])
+            and not self.blacklisted(j["company"], j["url"])
+            and not self.application_history.find_duplicate(j["company"], j["url"])
+            and normalize_company(j["company"])
+            not in {
+                normalize_company(x["company"]) for x in (batch or {}).get("jobs", [])
+            }
+        }
+        catalog_sufficient = len(available) >= needed + params.offset
+        self.progress(
+            f"先查岗位库：找到 {len(available)} 家可用企业，本批还需 {needed} 个岗位"
         )
         # One Agent call collects a batch; the model need not request each job.
         from frontend.job_discovery import (
@@ -568,9 +627,13 @@ class AutonomousWorkflow:
             if v and v != "不限" and k not in ("companyBlacklist", "keywords")
         )
         try:
-            key = self.services.job_search.key()
+            key = self.services.job_search.key() if not catalog_sufficient else ""
             if not key:
-                raise DiscoveryError("尚未配置全网搜索服务，请使用浏览器搜索。")
+                raise DiscoveryError(
+                    "岗位库已有足够候选，无需全网搜索。"
+                    if catalog_sufficient
+                    else "尚未配置全网搜索服务，请使用浏览器搜索。"
+                )
             searcher = WebDiscovery(key)
             async with aiohttp.ClientSession(
                 timeout=aiohttp.ClientTimeout(total=20), trust_env=False
@@ -638,6 +701,9 @@ class AutonomousWorkflow:
                                 "url": hit.url,
                                 "summary": hit.snippet[:700],
                                 "verifiedJob": False,
+                                "applicationEntryAllowed": application_url_allowed(
+                                    hit.url
+                                ),
                             }
                         )
         except (DiscoveryError, aiohttp.ClientError, TimeoutError, ValueError) as exc:
@@ -666,7 +732,8 @@ class AutonomousWorkflow:
         eligible = [
             j
             for j in result.jobs
-            if not self.blacklisted(j["company"], j["url"], j.get("source", ""))
+            if application_url_allowed(j["url"])
+            and not self.blacklisted(j["company"], j["url"], j.get("source", ""))
             and canonical_job_url(j["url"]) not in seen
             and "".join(j["company"].split()).casefold() not in seen_companies
             and not self.application_history.find_duplicate(j["company"], j["url"])
@@ -714,6 +781,8 @@ class AutonomousWorkflow:
             "offset": params.offset,
             "hasMore": params.offset + len(jobs) < len(eligible),
             "requirements": self.task_options.requirements.model_dump(),
+            "catalogChecked": True,
+            "catalogEligibleCompanies": len(available),
             "targetCount": self.task_options.count,
             "batch": self.batch_context(),
             "note": "jobs 已在搜索阶段过滤黑名单、重复投递并按企业去重；候选池大于实际投递数。leads 为全网线索，不等于已核实岗位。打开链接前先用已给出的企业名称、标题、摘要和网址排除黑名单，企业身份不明先检索确认。核对岗位要求后依次申请，不足补充检索，不编造。链接和信息已保存。",
@@ -725,6 +794,12 @@ class AutonomousWorkflow:
         )
 
     async def choose_position(self, params):
+        from .recruitment_urls import application_url_allowed
+
+        if not application_url_allowed(params.url):
+            raise ValueError(
+                "请选择企业官网或企业专属招聘站投递，不能通过第三方招聘平台投递。"
+            )
         item = self.job["companies"][self.job["current"]]
         if (
             item.get("job")
@@ -909,13 +984,13 @@ class AutonomousWorkflow:
         )
         action(
             "search_jobs",
-            "批量调用全网搜索并查询岗位库，先过滤企业黑名单、已处理记录并按企业去重，再保存候选链接。候选池至少为本批目标投递数的三倍（上限200）；投5份不等于只找5条。limit 是候选数而非投递数。未知企业身份先检索确认再打开，结果不足可补搜。",
+            "先查本地岗位库，候选不足才批量调用全网搜索，先过滤企业黑名单、已处理记录并按企业去重，再保存候选链接。候选池至少为本批目标投递数的三倍（上限200）；投5份不等于只找5条。limit 是候选数而非投递数。未知企业身份先检索确认再打开，结果不足可补搜。",
             SearchJobs,
             self.search_positions,
         )
         action(
             "confirm_job",
-            "核实当前真实岗位详情并保存：提供企业、岗位、当前链接、完整JD和匹配理由。自动找岗先逐个confirm_job，凑齐本批最多5个（剩余不足5个按剩余数）后才choose_job开始投递。不符合本轮偏好但有效的岗位用forBatch=false只入库，不占本批名额。不能拿招聘首页或搜索摘要当真实岗位。",
+            "从search_jobs返回的jobs或leads中选择具体官网岗位加入本批，无需先打开网页，可在一次判断中确认多个岗位。提供企业、岗位、结果链接和匹配理由。凑齐min(5,剩余数)才依次打开、读取完整JD并choose_job。不足继续搜索。第三方平台和招聘首页不能算确定岗位。搜索线索只选入本批，不当作已核实JD入库；官网已打开的有效完整岗位可用forBatch=false只入库。",
             ConfirmJob,
             self.confirm_position,
         )

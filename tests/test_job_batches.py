@@ -183,6 +183,61 @@ class JobBatchTests(unittest.IsolatedAsyncioTestCase):
             self.configure(count)
             self.assertEqual(self.a.batch_context()["required"], count)
 
+    async def test_catalog_batch_is_confirmed_without_browser_or_paid_search(self):
+        a = self.a
+        jobs = [self.job(i) for i in range(5)]
+        a.application_page = AsyncMock(
+            side_effect=AssertionError("Do not open pages while collecting")
+        )
+        with (
+            patch.object(
+                self.services.job_search,
+                "query_catalog",
+                new=AsyncMock(return_value=SimpleNamespace(jobs=jobs)),
+            ),
+            patch.object(
+                self.services.job_search,
+                "key",
+                side_effect=AssertionError("Catalog is sufficient"),
+            ),
+        ):
+            result = await a.search_positions(SearchJobs(keywords="Python"))
+        self.assertEqual(len(result["jobs"]), 5)
+        self.assertTrue(result["catalogChecked"])
+        for job in jobs:
+            await a.confirm_position(ConfirmJob(**job))
+        self.assertTrue(a.batch_context()["ready"])
+        a.application_page.assert_not_awaited()
+
+    async def test_search_lead_is_selected_without_claiming_verified_jd(self):
+        a = self.a
+        job = self.job(0)
+        a.job["discovery"] = {
+            "leads": [
+                {"url": job["url"], "title": job["title"], "summary": "Python role"}
+            ]
+        }
+        a.application_page = AsyncMock(
+            side_effect=AssertionError("No browser navigation")
+        )
+        job.pop("jd")
+        result = await a.confirm_position(ConfirmJob(**job))
+        self.assertTrue(result["addedToBatch"])
+        self.assertFalse(result["catalogStored"])
+        self.assertEqual(a.current_batch()["jobs"][0]["jd"], "")
+
+    async def test_third_party_entries_cannot_be_confirmed_or_selected(self):
+        for url in (
+            "https://www.nowcoder.com/jobs/detail/123",
+            "https://www.zhipin.com/job_detail/123",
+            "https://career.cuhk.edu.cn/job/view/id/123",
+        ):
+            job = {**self.job(0), "url": url}
+            with self.assertRaisesRegex(ValueError, "企业官网"):
+                await self.a.confirm_position(ConfirmJob(**job))
+            with self.assertRaisesRegex(ValueError, "企业官网"):
+                await self.a.choose_position(ChooseJob(**job))
+
     async def test_handoff_binds_next_job_and_upload_uses_correct_material(self):
         from browser_use import ActionResult
         from browser_use.tools.service import Tools
