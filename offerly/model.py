@@ -2,6 +2,7 @@
 
 import json
 import logging
+import time
 from typing import get_args
 
 from openai import APIError, RateLimitError
@@ -98,12 +99,16 @@ class AgentDeepSeek(ChatDeepSeek):
                 "function": {"name": output_format.__name__},
             }
         try:
+            started = time.monotonic()
             async with self._client() as client:
                 response = await client.chat.completions.create(
                     model=self.model,
                     messages=payload,
                     **options,
                 )
+            logger.info(
+                "Model response received: elapsed=%.2fs", time.monotonic() - started
+            )
         except RateLimitError:
             raise ModelRateLimitError(
                 "模型服务限流，请稍后继续。", model=self.name
@@ -113,7 +118,10 @@ class AgentDeepSeek(ChatDeepSeek):
             body = getattr(exc, "body", None)
             error = body.get("error", body) if isinstance(body, dict) else {}
             message = str(error.get("message", "")) if isinstance(error, dict) else ""
-            if status == 400 and "Thinking mode does not support this tool_choice" in message:
+            if (
+                status == 400
+                and "Thinking mode does not support this tool_choice" in message
+            ):
                 reason = "模型请求参数冲突（400）：思考模式不支持指定工具调用，请检查服务端思考模式配置。"
             else:
                 reason = {

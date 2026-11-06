@@ -596,16 +596,27 @@ class UserBrowserConnection:
         os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
         os.environ.setdefault("BROWSER_USE_CLOUD_SYNC", "false")
         os.environ.setdefault("BROWSER_USE_VERSION_CHECK", "false")
-        from browser_use import BrowserSession
+        from .browser_session import ConnectedBrowserSession
 
-        browser = BrowserSession(
+        browser = ConnectedBrowserSession(
             cdp_url=self.ws_url,
             is_local=True,
+            headless=False,
+            no_viewport=True,
             keep_alive=True,
             enable_default_extensions=False,
         )
         try:
             await browser.start()
+            # Clear overrides left on owned tabs by an earlier server session.
+            # Personal tabs remain outside the bridge and are never changed.
+            for target in tuple(self.owned_targets):
+                session = await browser.get_or_create_cdp_session(
+                    target_id=target, focus=False
+                )
+                await session.cdp_client.send.Emulation.clearDeviceMetricsOverride(
+                    session_id=session.session_id
+                )
         except Exception:
             await browser.stop()
             raise

@@ -183,6 +183,37 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
                         ],
                         "1.3",
                     )
+                    target = await connection.create_tab("about:blank")
+                    attached = await connection.call(
+                        "Target.attachToTarget", {"targetId": target, "flatten": True}
+                    )
+                    page_session = attached["sessionId"]
+
+                    async def dimensions():
+                        result = await connection.call(
+                            "Runtime.evaluate",
+                            {
+                                "expression": "[innerWidth,innerHeight,devicePixelRatio]",
+                                "returnByValue": True,
+                            },
+                            page_session,
+                        )
+                        return result["result"]["value"]
+
+                    original = await dimensions()
+                    browser = await connection.browser_session()
+                    try:
+                        self.assertFalse(browser.browser_profile.headless)
+                        self.assertTrue(browser.browser_profile.no_viewport)
+                        self.assertEqual(await dimensions(), original)
+                        from browser_use.browser.events import AgentFocusChangedEvent
+
+                        await browser.on_AgentFocusChangedEvent(
+                            AgentFocusChangedEvent(target_id=target, url="about:blank")
+                        )
+                        self.assertEqual(await dimensions(), original)
+                    finally:
+                        await browser.stop()
                     await manager.browsers.disconnect("chrome")
             finally:
                 await manager.close()
