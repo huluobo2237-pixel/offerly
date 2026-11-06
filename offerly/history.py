@@ -109,6 +109,7 @@ class ApplicationHistory:
             "abandoned",
             "incomplete",
             "already_applied",
+            "unavailable",
         ):
             raise ValueError("不支持的投递状态。")
         with self.connect() as db:
@@ -116,7 +117,7 @@ class ApplicationHistory:
                 """INSERT INTO applications VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(key) DO UPDATE SET company=excluded.company, job_title=excluded.job_title,
                 job_url=excluded.job_url,state=excluded.state,updated_at=excluded.updated_at,receipt=excluded.receipt
-                WHERE applications.state NOT IN ('submitted','user_confirmed','already_applied')""",
+                WHERE applications.state NOT IN ('submitted','user_confirmed','already_applied','unavailable')""",
                 (
                     self.direct_key(url),
                     company,
@@ -140,7 +141,7 @@ class ApplicationHistory:
         name = "".join(company.split()).casefold()
         with self.connect() as db:
             for row in db.execute(
-                "SELECT company,job_title,job_url,state FROM applications WHERE state IN ('submitted','user_confirmed','pending_review','submission_unknown','already_applied')"
+                "SELECT company,job_title,job_url,state FROM applications WHERE state IN ('submitted','user_confirmed','pending_review','submission_unknown','already_applied','unavailable')"
             ):
                 if (
                     canonical_job_url(row[2]) == canonical_job_url(url)

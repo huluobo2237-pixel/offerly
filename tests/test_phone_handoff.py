@@ -34,6 +34,43 @@ class Request(dict):
 
 
 class PhoneDecisionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_human_tools_use_assistance_timeout_without_changing_other_tools(
+        self,
+    ):
+        from unittest.mock import patch
+        from browser_use import ActionResult
+
+        tools = self.agent.tools()
+        model = tools.registry.create_action_model()
+
+        async def wait_budget(task, timeout):
+            return await task
+
+        for name, params in (
+            ("ask_user", {"reason": "Login"}),
+            ("request_review", {"reason": "Review"}),
+            ("read_candidate_profile", {}),
+        ):
+            action = model.model_validate({name: params})
+            with (
+                patch.object(
+                    tools.registry,
+                    "execute_action",
+                    new=AsyncMock(return_value=ActionResult(extracted_content="ok")),
+                ),
+                patch(
+                    "browser_use.tools.service.asyncio.wait_for",
+                    new=AsyncMock(side_effect=wait_budget),
+                ) as waiting,
+            ):
+                # Execute normally below; this test only captures the outer budget.
+                result = await tools.act(action, browser_session=None)
+                self.assertEqual(
+                    waiting.call_args.kwargs["timeout"],
+                    1950 if name != "read_candidate_profile" else 180,
+                )
+                self.assertEqual(result.extracted_content, "ok")
+
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -91,7 +128,6 @@ class PhoneDecisionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(a.connection.agent_mode)
         self.assertFalse(output.is_done)
         return a.application_history.records()[0]
-
 
     async def test_abandon_during_information_assistance_advances_without_submission(
         self,

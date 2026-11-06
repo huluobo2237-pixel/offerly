@@ -23,6 +23,74 @@ from offerly.services import ApplicationServices
 
 
 class JobBatchTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_only_candidates_bind_and_later_accept_live_jd(self):
+        self.configure(2)
+        a = self.a
+        jobs = [self.job(i) for i in range(2)]
+        a.job["discovery"] = {
+            "leads": [{"url": j["url"], "title": j["title"]} for j in jobs]
+        }
+        for job in jobs:
+            await a.confirm_position(ConfirmJob(**{**job, "jd": ""}))
+        a.bind_next_confirmed_job()
+        self.assertEqual(a.job["companies"][0]["job"]["jd"], "")
+        self.visit(jobs[0]["url"])
+        with self.assertRaisesRegex(ValueError, "尚无完整JD"):
+            await a.choose_position(ChooseJob(**{**jobs[0], "jd": ""}))
+        await a.choose_position(ChooseJob(**jobs[0]))
+        self.assertEqual(a.job["companies"][0]["job"]["jd"], jobs[0]["jd"])
+
+    async def test_company_application_limit_moves_to_next_job_without_false_submission(
+        self,
+    ):
+        self.configure(3)
+        a = self.a
+        for i in range(3):
+            job = self.job(i)
+            self.visit(job["url"])
+            await a.confirm_position(ConfirmJob(**job))
+        job = self.job(0)
+        self.visit(job["url"])
+        await a.choose_position(ChooseJob(**job))
+        a.application_page = AsyncMock(
+            return_value=SimpleNamespace(
+                evaluate=AsyncMock(
+                    return_value={
+                        "url": job["url"],
+                        "title": job["title"],
+                        "status": "",
+                        "blocked": "已有职位在流程中，不能再次投递",
+                    }
+                )
+            )
+        )
+        result = await a.skip_existing_application()
+        self.assertIsNotNone(result)
+        self.assertEqual(a.job["current"], 0)
+        self.assertEqual(a.job["companies"][0]["job"]["url"], self.job(1)["url"])
+        self.assertEqual(
+            a.application_history.find_duplicate(job["company"], job["url"])["state"],
+            "unavailable",
+        )
+        self.assertNotIn("previouslyApplied", a.job)
+        self.assertEqual(len(a.job["companies"]), 3)
+
+    async def test_another_batch_page_cannot_receive_current_job_resume(self):
+        a = self.a
+        for i in range(5):
+            job = self.job(i)
+            self.visit(job["url"])
+            await a.confirm_position(ConfirmJob(**job))
+        self.visit(self.job(0)["url"])
+        await a.choose_position(ChooseJob(**self.job(0)))
+        a.browser = object()
+        self.visit(self.job(1)["url"])
+        with self.assertRaisesRegex(ValueError, "禁止为其他岗位"):
+            await a.check_job_page()
+        # A login or form redirect is allowed; only known other jobs are rejected.
+        self.visit("https://employer0.invalid/apply/login")
+        await a.check_job_page()
+
     async def test_existing_application_is_replaced_and_remaining_count_is_refilled(
         self,
     ):

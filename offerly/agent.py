@@ -225,6 +225,10 @@ class RecruitmentAgent(AutonomousWorkflow):
         class ApplicationTools(Tools):
             async def act(self, action, browser_session, **kwargs):
                 command = action.model_dump(exclude_unset=True)
+                if set(command) & {"ask_user", "request_review", "use_tata"}:
+                    # Human assistance waits 30 minutes; the generic 180s cap
+                    # must not cancel it and resume the model behind the user.
+                    kwargs["action_timeout"] = 1950
                 upload = None
                 if "navigate" in command:
                     url = command["navigate"].get("url", "")
@@ -234,6 +238,10 @@ class RecruitmentAgent(AutonomousWorkflow):
                             error="该链接属于用户黑名单企业，已在打开前拦截。请使用其他候选岗位。"
                         )
                 if "upload_file" in command:
+                    try:
+                        await owner.check_job_page()
+                    except ValueError as exc:
+                        return ActionResult(error=str(exc))
                     params = command["upload_file"]
                     material = next(
                         (
@@ -375,6 +383,10 @@ class RecruitmentAgent(AutonomousWorkflow):
             terminates_sequence=True,
         )
         async def use_tata(params: NoParams):
+            try:
+                await self.check_job_page()
+            except ValueError as exc:
+                return ActionResult(error=str(exc))
             batch = self.current_batch()
             if batch and (
                 len(batch["jobs"]) < batch["size"]
@@ -415,7 +427,7 @@ class RecruitmentAgent(AutonomousWorkflow):
             )
 
         @tools.action(
-            "当前岗位官网明确显示已投递或已申请时调用。核实当前详情页后直接跳过，并继续下一岗位；不计入本轮新投递数量。",
+            "当前岗位官网显示已投递、已申请，或出现已有职位在流程中不能再次投递等明确限制时调用。务必在提示仍显示时调用，再关闭提示或切换岗位；工具更新当前岗位并继续下一岗，不计入新增投递数。",
             param_model=NoParams,
             terminates_sequence=True,
         )
@@ -425,7 +437,7 @@ class RecruitmentAgent(AutonomousWorkflow):
                 result
                 if result is not None
                 else ActionResult(
-                    error="当前岗位详情页没有可核实的已投递状态，请继续申请流程。"
+                    error="当前登记岗位与网页不一致，或没有可核实的已投递/限制投递提示。不要把其他网页当作当前岗位；返回 task 上下文中的当前岗位处理，需跳过时先在该岗位提示仍显示时调用本工具，再进入下一岗。"
                 )
             )
 

@@ -206,7 +206,7 @@
   "local_modifications": {
     "browser_use/agent/system_prompts/system_prompt.md": {
       "reason": "Chinese recruitment workflow using the original section structure, with explicit resume entry IDs and evidence references.",
-      "sha256": "facbb4c44bf8a081ec9dec070d39c4f787879c6f3300e965bdd390ebf702e55e"
+      "sha256": "8d59552c53761b80acbbb0ba6926c3134c16253cd8692824f256c590c32c0665"
     }
   }
 }

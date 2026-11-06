@@ -835,6 +835,19 @@ class AutonomousWorkflow:
         item = self.job["companies"][self.job["current"]]
         if item["job"]:
             if item["job"]["url"] == params.url:
+                if not item["job"].get("jd"):
+                    jd = params.jd or (confirmed or {}).get("jd", "")
+                    if len(jd.strip()) < 40:
+                        raise ValueError(
+                            "本岗已从搜索结果预登记，但尚无完整JD。请读取官网职责和要求后再次调用 choose_job，不能把预登记当作JD已核实。"
+                        )
+                    page = await self.application_page()
+                    if await page.evaluate("() => location.href") != params.url:
+                        raise ValueError("请先打开本岗官网详情，再补充完整JD。")
+                    item["job"]["jd"] = jd
+                    self.catalog_job(
+                        params.company, params.title, params.url, jd, params.city
+                    )
                 return {
                     "job": {k: v for k, v in item["job"].items() if k != "jd"},
                     "attachments": self.files[self.job["current"]],
@@ -905,6 +918,11 @@ class AutonomousWorkflow:
             }
         if not item["job"]:
             raise ValueError("请先打开岗位详情并调用 choose_job，记录 JD。")
+        if len(item["job"].get("jd", "").strip()) < 40:
+            raise ValueError(
+                "当前岗位只有搜索结果预登记信息，请先读取官网完整JD并调用 choose_job 补齐，再生成简历。"
+            )
+        await self.check_job_page()
         record = self.workspace_record
         document = build_document(record.profile)
         document.modules = {
@@ -1028,18 +1046,50 @@ class AutonomousWorkflow:
         )
         if not chosen:
             return
-        job = ResumeJob(
-            id=secrets.token_hex(12),
+        job_data = {
+            "id": secrets.token_hex(12),
             **{k: v for k, v in chosen.items() if k != "reason"},
+        }
+        # A search candidate may not have a full JD until its detail page opens.
+        # Keep it as a pending selection; ResumeJob requires a real nonempty JD.
+        job_data = (
+            ResumeJob.model_validate(job_data).model_dump()
+            if job_data.get("jd")
+            else job_data
         )
         item.update(
-            name=job.company,
-            job=job.model_dump(),
+            name=job_data["company"],
+            job=job_data,
             reason=chosen.get("reason", ""),
             state="RUNNING",
         )
-        self.selected_urls.add(job.url)
+        self.selected_urls.add(job_data["url"])
         self.record_target("selected", item["reason"])
+
+    async def check_job_page(self):
+        """Reject known other batch jobs, while allowing the current ATS form redirects."""
+        from .history import canonical_job_url
+
+        job = self.job["companies"][self.job["current"]].get("job")
+        if not job or self.browser is None:
+            return
+        page = await self.application_page()
+        url = await page.evaluate("() => location.href")
+        key = canonical_job_url(url)
+        if key == canonical_job_url(job["url"]):
+            return
+        other = next(
+            (
+                j
+                for j in (self.current_batch() or {}).get("jobs", [])
+                if canonical_job_url(j["url"]) == key
+            ),
+            None,
+        )
+        if other:
+            raise ValueError(
+                f"当前登记岗位是 {job['company']} · {job['title']}，网页却是 {other['company']} · {other['title']}。禁止为其他岗位生成/上传当前简历。先返回当前登记岗位处理官网限制或请求用户跳过，再使用工具返回的下一岗位上下文。"
+            )
 
     async def skip_existing_application(self):
         """Only a matching live detail page can establish an existing application."""
@@ -1053,7 +1103,7 @@ class AutonomousWorkflow:
             return None
         page = await self.application_page()
         evidence = await page.evaluate(
-            """() => ({url: location.href, title: document.body.innerText, status: [...document.querySelectorAll('button,a,[role=button]')].filter(e=>e.getClientRects().length).map(e=>(e.innerText||e.value||'').trim()).find(t=>/^(已投递|已申请|已提交申请|申请已提交|简历已投递|already applied|application submitted)$/i.test(t)) || ''})"""
+            r"""() => {const text=document.body.innerText;const visible=[...document.querySelectorAll('button,a,[role=button],span,div,p')].filter(e=>e.getClientRects().length&&(e.children.length===0||e.matches('button,a,[role=button]')));return {url:location.href,title:text,status:visible.map(e=>(e.innerText||e.value||'').trim()).find(t=>/^(已投递|已申请|已提交申请|申请已提交|简历已投递|already applied|application submitted)$/i.test(t))||'',blocked:(text.match(/已有职位在流程中[，,\s]*[不能无法再次]*投递|已有.{0,12}(?:申请|职位).{0,12}(?:流程中|进行中).{0,16}(?:不能|无法).{0,6}投递|(?:您|你)已达到.{0,12}投递(?:次数|数量)?上限/)||[])[0]||''};}"""
         )
         if isinstance(evidence, str):
             try:
@@ -1063,20 +1113,23 @@ class AutonomousWorkflow:
         if not isinstance(evidence, dict):
             return None
         if (
-            not evidence.get("status")
+            not (evidence.get("status") or evidence.get("blocked"))
             or canonical_job_url(evidence.get("url", ""))
             != canonical_job_url(job["url"])
             or job["title"].replace(" ", "")
             not in evidence.get("title", "").replace(" ", "")
         ):
             return None
+        state = "already_applied" if evidence.get("status") else "unavailable"
         reason = (
-            "官网本岗位显示“" + evidence["status"] + "”，自动跳过，不计入本轮新投递数。"
+            "官网本岗位显示“"
+            + (evidence.get("status") or evidence["blocked"])
+            + "”，自动跳过，不计入本轮新投递数。"
         )
-        self.record_target("already_applied", reason)
-        self.job.setdefault("previouslyApplied", []).append(
-            {"company": item["name"], "job": job, "reason": reason}
-        )
+        self.record_target(state, reason)
+        self.job.setdefault(
+            "previouslyApplied" if state == "already_applied" else "unavailableJobs", []
+        ).append({"company": item["name"], "job": job, "reason": reason})
         if self.task_options.source != "search":
             finished = self.advance_target("SKIPPED", reason)
             self.progress(
@@ -1254,7 +1307,7 @@ class AutonomousWorkflow:
                         enable_planning=False,
                         enable_signal_handler=False,
                         max_failures=3,
-                        step_timeout=1860,
+                        step_timeout=2100,
                         available_file_paths=[
                             f["path"] for f in self.files[self.job["current"]]
                         ],

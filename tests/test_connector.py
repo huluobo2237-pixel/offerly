@@ -244,6 +244,44 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
                         page = await browser.get_current_page()
                         self.assertEqual(await page.evaluate("() => 2 + 2"), "4")
 
+                        # Verify the actual site-message detector, not a mocked status.
+                        from types import SimpleNamespace
+                        from unittest.mock import AsyncMock
+
+                        await connection.call(
+                            "Page.navigate",
+                            {
+                                "url": "data:text/html;charset=utf-8,<h1>Local developer</h1><div role=alert>已有职位在流程中，不能再次投递</div>"
+                            },
+                            page_session,
+                        )
+                        for _ in range(50):
+                            title = await page.evaluate("() => document.body.innerText")
+                            if "已有职位" in title:
+                                break
+                            await asyncio.sleep(0.05)
+                        url = await page.evaluate("() => location.href")
+                        owner = manager.agent
+                        owner.application_page = AsyncMock(return_value=page)
+                        owner.task_options = SimpleNamespace(source="companies")
+                        owner.job = {
+                            "current": 0,
+                            "companies": [
+                                {
+                                    "name": "Local employer",
+                                    "job": {"title": "Local developer", "url": url},
+                                    "state": "RUNNING",
+                                }
+                            ],
+                            "progress": {"timeline": []},
+                        }
+                        skipped = await owner.skip_existing_application()
+                        self.assertIsNotNone(skipped)
+                        self.assertEqual(
+                            owner.application_history.records()[0]["state"],
+                            "unavailable",
+                        )
+
                         from urllib.parse import quote
 
                         phone = (
