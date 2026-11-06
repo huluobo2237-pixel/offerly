@@ -483,6 +483,21 @@ class RecruitmentAgent(AutonomousWorkflow):
                 nonlocal balance_error
                 if balance_error is not None:
                     raise balance_error
+                if (
+                    owner.connection is not None
+                    and hasattr(owner.connection, "status")
+                    and not owner.connection.status()["connected"]
+                ):
+                    from browser_use.llm.exceptions import ModelProviderError
+
+                    balance_error = ModelProviderError(
+                        "浏览器连接已断开，已停止模型请求。请重新连接浏览器后继续。",
+                        status_code=503,
+                    )
+                    owner.last_model_error = str(balance_error)
+                    if owner.agent:
+                        owner.agent.stop()
+                    raise balance_error
                 output_format = kwargs.get(
                     "output_format", args[1] if len(args) > 1 else None
                 )

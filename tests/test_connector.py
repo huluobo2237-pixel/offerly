@@ -213,6 +213,37 @@ class ConnectorTests(unittest.IsolatedAsyncioTestCase):
                         )
                         self.assertEqual(await dimensions(), original)
                         # Long URLs must not expand the mobile page or modal.
+                        from frontend.remote import BrowserVideo, ChromeWire
+                        from websockets.asyncio.client import connect
+
+                        endpoint = connection.ws_url.replace(
+                            "/devtools/browser/session", "/devtools/page/" + target
+                        )
+                        for _ in range(3):
+                            video = BrowserVideo()
+                            wire = ChromeWire(await connect(endpoint), video)
+                            try:
+                                await wire.call("Page.enable")
+                                await wire.call(
+                                    "Page.startScreencast",
+                                    {
+                                        "format": "jpeg",
+                                        "maxWidth": 640,
+                                        "maxHeight": 480,
+                                    },
+                                )
+                                frame = await asyncio.wait_for(video.recv(), 5)
+                                self.assertGreater(frame.width, 0)
+                            finally:
+                                await wire.close()
+                                video.stop()
+                            self.assertIn(
+                                "protocolVersion",
+                                await connection.call("Browser.getVersion"),
+                            )
+                        page = await browser.get_current_page()
+                        self.assertEqual(await page.evaluate("() => 2 + 2"), "4")
+
                         from urllib.parse import quote
 
                         phone = (

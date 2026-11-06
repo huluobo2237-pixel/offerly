@@ -180,6 +180,8 @@ class UserBrowserConnection:
     async def call(self, method, params=None, session_id=None, timeout=30):
         if self.socket is None:
             raise ConnectionError("浏览器尚未连接。")
+        if self.reader is not None and self.reader.done():
+            raise ConnectionError("浏览器连接已断开，请重新连接。")
         self.sequence += 1
         ident = self.sequence
         future = asyncio.get_running_loop().create_future()
@@ -238,6 +240,10 @@ class UserBrowserConnection:
                     attached_session = message["params"]["sessionId"]
                     self.sessions.add(attached_session)
                     self.session_targets[attached_session] = target
+                    if not session:
+                        # Root attachments include phone viewers. Replay only
+                        # to the Agent client that requested its own attachment.
+                        continue
                 if (
                     message.get("method")
                     in ("Target.targetCreated", "Target.targetInfoChanged")
@@ -256,12 +262,23 @@ class UserBrowserConnection:
                     )
                 for client, page_session in tuple(self.page_clients.items()):
                     if session == page_session and not client.closed:
-                        await client.send_json(
-                            {k: v for k, v in message.items() if k != "sessionId"}
+                        await self._send_client(
+                            client,
+                            {k: v for k, v in message.items() if k != "sessionId"},
                         )
                 for client in tuple(self.clients):
+                    owned = self.client_sessions.get(client, set())
+                    detached_session = (
+                        message.get("params", {}).get("sessionId")
+                        if message.get("method") == "Target.detachedFromTarget"
+                        else None
+                    )
+                    if session and session not in owned:
+                        continue
+                    if detached_session and detached_session not in owned:
+                        continue
                     if not client.closed:
-                        await client.send_json(message)
+                        await self._send_client(client, message)
                 if message.get("method") == "Target.targetDestroyed":
                     self.owned_targets.discard(target)
                     self.agent_ready = False
@@ -275,8 +292,10 @@ class UserBrowserConnection:
                     self.session_targets.pop(ident, None)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            pass
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "Browser upstream reader stopped: %s", type(exc).__name__
+            )
         finally:
             if self.state == "connected":
                 self.state, self.error = (
@@ -286,6 +305,15 @@ class UserBrowserConnection:
             for future in tuple(self.pending.values()):
                 if not future.done():
                     future.set_exception(ConnectionError("浏览器连接已断开。"))
+
+    async def _send_client(self, client, message):
+        """A departing viewer must never tear down the shared browser reader."""
+        try:
+            await asyncio.wait_for(client.send_json(message), timeout=2)
+        except (ConnectionError, RuntimeError, TimeoutError):
+            self.clients.discard(client)
+            self.page_clients.pop(client, None)
+            logging.getLogger(__name__).info("Detached an unavailable browser viewer")
 
     async def _start_bridge(self):
         if self.runner is not None:
@@ -334,8 +362,9 @@ class UserBrowserConnection:
         ]
         for recipient in tuple(self.clients):
             if not recipient.closed:
-                await recipient.send_json(
-                    {"method": "Target.targetCreated", "params": {"targetInfo": info}}
+                await self._send_client(
+                    recipient,
+                    {"method": "Target.targetCreated", "params": {"targetInfo": info}},
                 )
         active_clients = (
             [client]
@@ -427,6 +456,23 @@ class UserBrowserConnection:
             self.session_targets[result["sessionId"]] = params["targetId"]
             if client is not None:
                 self.client_sessions.setdefault(client, set()).add(result["sessionId"])
+                info = (
+                    await self.call(
+                        "Target.getTargetInfo", {"targetId": params["targetId"]}
+                    )
+                )["targetInfo"]
+                await self._send_client(
+                    client,
+                    {
+                        "method": "Target.attachedToTarget",
+                        "params": {
+                            "sessionId": result["sessionId"],
+                            "targetInfo": info,
+                            "waitingForDebugger": False,
+                        },
+                        **({"sessionId": session} if session else {}),
+                    },
+                )
         if method == "Target.detachFromTarget":
             self.sessions.discard(params.get("sessionId", ""))
             self.session_targets.pop(params.get("sessionId", ""), None)
@@ -439,11 +485,12 @@ class UserBrowserConnection:
                 info = (await self.call("Target.getTargetInfo", {"targetId": owner}))[
                     "targetInfo"
                 ]
-                await client.send_json(
+                await self._send_client(
+                    client,
                     {
                         "method": "Target.targetInfoChanged",
                         "params": {"targetInfo": info},
-                    }
+                    },
                 )
         return result
 
@@ -524,13 +571,16 @@ class UserBrowserConnection:
                     data = json.loads(frame.data)
                     try:
                         result = await self._forward({**data, "sessionId": session})
-                        await ws.send_json({"id": data["id"], "result": result})
+                        await self._send_client(
+                            ws, {"id": data["id"], "result": result}
+                        )
                     except Exception as exc:
-                        await ws.send_json(
+                        await self._send_client(
+                            ws,
                             {
                                 "id": data.get("id"),
                                 "error": {"code": -32000, "message": str(exc)},
-                            }
+                            },
                         )
         finally:
             self.page_clients.pop(ws, None)
@@ -561,7 +611,7 @@ class UserBrowserConnection:
             if data.get("sessionId"):
                 response["sessionId"] = data["sessionId"]
             if not ws.closed:
-                await ws.send_json(response)
+                await self._send_client(ws, response)
 
         try:
             async for frame in ws:
